@@ -1,12 +1,11 @@
-use std::time::Instant;
-
 use egui::{ClippedPrimitive, Context, TexturesDelta, RichText, FontFamily, FontId, Align, Stroke};
 use egui_wgpu::renderer::{Renderer, ScreenDescriptor};
+use egui_winit::EventResponse;
 use pixels::{wgpu, PixelsContext};
 use winit::event_loop::EventLoopWindowTarget;
 use winit::window::Window;
 
-use crate::fractals::Fractals;
+use crate::{fractals::{Fractals, COLOUR_GRADIENTS}, Flags};
 
 /// Manages all state required for rendering egui over `Pixels`.
 pub(crate) struct Framework {
@@ -30,8 +29,6 @@ pub struct Gui {
     // Track the position and size of the egui window.
     window_open_size: (f32, f32),
     window_closed_size: (f32, f32),
-    last_mouse_move: Instant,
-    mouse_in_window: bool,
     font: FontId,
 }
 
@@ -53,7 +50,8 @@ impl Framework {
         let egui_ctx = Context::default();
         // Change font colour to white
         let mut style = egui::Style::default();
-        style.visuals.override_text_color = Some(egui::Color32::from_rgb(255, 255, 255));
+        style.visuals.override_text_color = Some(egui::Color32::from_rgb(255, 255, 255)); // set text to white
+        style.spacing.item_spacing = egui::Vec2::new(6.0, 6.0); // increase spacing between items
         egui_ctx.set_style(style);
 
         let visual = egui::Visuals::dark();
@@ -70,7 +68,6 @@ impl Framework {
         let renderer = Renderer::new(pixels.device(), pixels.render_texture_format(), None, 1);
         let textures = TexturesDelta::default();
         
-
         let gui = Gui::new(window_position, window_open_size, window_closed_size);
 
         Self {
@@ -85,8 +82,8 @@ impl Framework {
     }
 
     /// Handle input events from the window manager.
-    pub(crate) fn handle_event(&mut self, event: &winit::event::WindowEvent) {
-        let _ = self.egui_state.on_event(&self.egui_ctx, event);
+    pub(crate) fn handle_event(&mut self, event: &winit::event::WindowEvent) -> EventResponse {
+        self.egui_state.on_event(&self.egui_ctx, event)
     }
 
     /// Resize egui.
@@ -102,12 +99,12 @@ impl Framework {
     }
 
     /// Prepare egui.
-    pub(crate) fn prepare(&mut self, window: &Window, current_fractal: &mut Fractals, fractal_change: &mut bool) {
+    pub(crate) fn prepare(&mut self, window: &Window, current_fractal: &mut Fractals, flags: &mut Flags) {
         // Run the egui frame and create all paint jobs to prepare for rendering.
         let raw_input = self.egui_state.take_egui_input(window);
         let output = self.egui_ctx.run(raw_input, |egui_ctx| {
             // Draw the demo application.
-            self.gui.ui(egui_ctx, current_fractal, fractal_change);
+            self.gui.ui(egui_ctx, current_fractal, flags);
         });
 
         self.textures.append(output.textures_delta);
@@ -161,10 +158,6 @@ impl Framework {
             self.renderer.free_texture(id);
         }
     }
-
-    pub(crate) fn get_gui(&mut self) -> &mut Gui {
-        &mut self.gui
-    }
 }
 
 /// Adds a label and a method to adjust the variable e.g. a slider
@@ -184,33 +177,26 @@ macro_rules! create_fractal_setting {
     };
 }
 
+/// Adds a selectable value to a combo box for a colour gradient
+macro_rules! create_colour_gradient_option {
+    ($ui:ident, $current_colour_gradient:ident, $font:ident, $colour_gradient:ident) => {
+        $ui.selectable_value($current_colour_gradient, String::from($colour_gradient), RichText::new($colour_gradient).font($font.clone()));
+    };
+}
+
 impl Gui {
     /// Create a `Gui`.
     fn new(window_position: (f32, f32), window_open_size: (f32,f32), window_closed_size: (f32,f32)) -> Self {
         Self { 
             window_open: true,
-            window_position: window_position,
-            window_open_size: window_open_size,
-            window_closed_size: window_closed_size,
-            last_mouse_move: Instant::now(),
-            mouse_in_window: false,
+            window_position,
+            window_open_size,
+            window_closed_size,
             font: FontId {
                 size: 15.0,
                 family: FontFamily::default(),
             },
         }
-    }
-
-    pub fn set_last_mouse_move(&mut self, time: Instant) {
-        self.last_mouse_move = time;
-    }
-
-    pub fn set_mouse_in_window(&mut self, mouse_in_window: bool) {
-        self.mouse_in_window = mouse_in_window;
-    }
-
-    pub fn get_window_open(&self) -> bool {
-        self.window_open
     }
 
     pub fn get_window_size(&self) -> (f32, f32) {
@@ -220,21 +206,26 @@ impl Gui {
             self.window_closed_size
         }
     }
-    pub fn get_window_position(&self) -> (f32, f32) {
-        self.window_position
-    }
 
     /// Create the UI using egui.
-    fn ui(&mut self, ctx: &Context, current_fractal: &mut Fractals, fractal_change: &mut bool) {
+    fn ui(&mut self, ctx: &Context, current_fractal: &mut Fractals, flags: &mut Flags) {
         let size = self.get_window_size();
-
         egui::Area::new("Settings")
         .fixed_pos(self.window_position)
         .movable(false)
         .show(ctx, |ui| {
+            // Change size depending on if the window is open or closed
             ui.set_width(size.0);
             ui.set_height(size.1);
-            ui.add_space(10.0);
+
+            // Move title slightly down when opening window
+            if self.window_open {
+                ui.add_space(10.0);
+            } else {
+                ui.add_space(5.0);
+            }
+            
+            // Add background to area
             ui.painter().rect_stroke(ui.max_rect(), 2.0, Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(150, 150, 150, 200)));
             ui.painter().rect_filled(ui.max_rect(), 2.0, egui::Color32::from_rgba_premultiplied(0, 0, 0, 255));
 
@@ -242,10 +233,10 @@ impl Gui {
             let collapse_button = ui.collapsing(drop_down_title, |ui| {
                 ui.separator();
 
-                // Name to be displayed as current fractal
                 let display_name = match current_fractal {
                     Fractals::Mandelbrot {..} => "Mandelbrot",
                     Fractals::Julia {..} => "Julia",
+                    Fractals::Newton {..} => "Newton"
                 };
                 
                 // Fractal selection
@@ -256,44 +247,93 @@ impl Gui {
                         egui::ComboBox::from_label("")
                         .selected_text(display_name)
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(current_fractal, Fractals::Mandelbrot {max_iterations: 100, escape_radius: 2.0},
+                            ui.selectable_value(current_fractal, Fractals::Mandelbrot {max_iterations: 100, escape_radius: 2.0, colour_gradient: "Magma".into()},
                                 RichText::new("Mandelbrot").font(self.font.clone()));
-                            ui.selectable_value(current_fractal, Fractals::Julia {max_iterations: 100, escape_radius: 2.0, c: (-0.7,0.27015)}, 
+                            ui.selectable_value(current_fractal, Fractals::Julia {max_iterations: 100, escape_radius: 2.0, c: (-0.7,0.27015), colour_gradient: "Magma".into()}, 
                                 RichText::new("Julia").font(self.font.clone()));
+                            ui.selectable_value(current_fractal, Fractals::Newton {max_iterations: 100, colour_gradient: "Magma".into()},
+                                RichText::new("Newton").font(self.font.clone()));
                         })
                     });
                 });
 
-                ui.separator();
+                // Colour gradient selection
+                let current_colour_gradient = match current_fractal {
+                    Fractals::Mandelbrot {ref mut colour_gradient, ..} => colour_gradient,
+                    Fractals::Julia {ref mut colour_gradient, ..} => colour_gradient,
+                    Fractals::Newton {ref mut colour_gradient, ..} => colour_gradient
+                };
+                let old_colour = current_colour_gradient.clone();
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Colour:").font(self.font.clone()));
+                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(10.0); // add space to right side of combo box
+                        egui::ComboBox::from_label(" ")
+                        .selected_text(current_colour_gradient.clone())
+                        .show_ui(ui, |ui| {
+                            let font = self.font.clone();
+                            for colour_gradient in COLOUR_GRADIENTS.iter() {
+                                let colour_gradient = *colour_gradient;
+                                create_colour_gradient_option!(ui, current_colour_gradient, font, colour_gradient);
+                            }
+                        });
+                    });
+                });
 
+                ui.separator();
                 
                 let font = &self.font;
+                // create a mutable reference to fractal_change as "." cant be used inside a macro call
+                let generate_fractal = &mut flags.generate_fractal;
                 // Display the correct settings for the selected fractal
-                let new_display_name = match current_fractal {
-                    Fractals::Mandelbrot { ref mut max_iterations, ref mut escape_radius } => {
+                match current_fractal {
+                    Fractals::Mandelbrot { ref mut max_iterations, ref mut escape_radius, ref colour_gradient,.. } => {
                         let slider1 = egui::Slider::new(max_iterations, 1..=10000).text("").clamp_to_range(true);
                         let slider2 = egui::Slider::new(escape_radius, 1.0..=10.0).text("").clamp_to_range(true);
-                        create_fractal_setting!(ui, fractal_change, font, ("Max Iterations", slider1), ("Escape Radius", slider2));
+                        create_fractal_setting!(ui, generate_fractal, font, ("Max Iterations", slider1), ("Escape Radius", slider2));
                         
-                        "Mandelbrot"
+                        flags.reset |= display_name != "Mandelbrot";
+                        flags.generate_fractal |= flags.reset || old_colour != *colour_gradient
                     },
-                    Fractals::Julia { ref mut max_iterations, ref mut escape_radius, ref mut c} => {
+                    Fractals::Julia { ref mut max_iterations, ref mut escape_radius, ref mut c, ref mut colour_gradient, ..} => {
                         let slider1 = egui::Slider::new(max_iterations, 1..=10000).text("").clamp_to_range(true);
                         let slider2 = egui::Slider::new(escape_radius, 1.0..=10.0).text("").clamp_to_range(true);
                         let slider3 = egui::Slider::new(&mut c.0, -1.5..=1.5).clamp_to_range(true);
                         let slider4 = egui::Slider::new(&mut c.1, -1.5..=1.5).clamp_to_range(true);
-                        create_fractal_setting!(ui, fractal_change, font, ("Max Iterations", slider1), ("Escape Radius", slider2), ("Real", slider3), ("Imaginary", slider4));
+                        create_fractal_setting!(ui, generate_fractal, font, ("Max Iterations", slider1), ("Escape Radius", slider2), ("Real", slider3), ("Imaginary", slider4));
                         
-                        "Julia"
+                        flags.reset |= display_name != "Julia";
+                        flags.generate_fractal |= flags.reset || old_colour != *colour_gradient
                     },
+                    Fractals::Newton { ref mut max_iterations, ref mut colour_gradient,.. } => {
+                        let slider1 = egui::Slider::new(max_iterations, 1..=10000).text("").clamp_to_range(true);
+                        create_fractal_setting!(ui, generate_fractal, font, ("Max Iterations", slider1));
+
+                        flags.reset |= display_name != "Newton";
+                        flags.generate_fractal |= flags.reset || old_colour != *colour_gradient
+                    }
                 };
-                // Check if the fractal has changed so that it can be redrawn
-                if !*fractal_change {
-                    *fractal_change = new_display_name != display_name;
+
+                // Reset button in bottom right
+                if self.window_open {
+                    ui.with_layout(egui::Layout::right_to_left(Align::BOTTOM), |ui| {
+                        ui.add_space(10.0); // add space to the right of the button
+                        ui.with_layout(egui::Layout::bottom_up(Align::RIGHT), |ui| {
+                            ui.add_space(10.0); // add space below the button
+                            if ui.button("Reset").clicked() {
+                                *current_fractal = match current_fractal{
+                                    Fractals::Mandelbrot {colour_gradient, ..} => Fractals::Mandelbrot {max_iterations: 100, escape_radius: 2.0, colour_gradient: colour_gradient.to_string()},
+                                    Fractals::Julia {colour_gradient,..} => Fractals::Julia {max_iterations: 100, escape_radius: 2.0, c: (-0.7,0.27015), colour_gradient: colour_gradient.to_string()},
+                                    Fractals::Newton {colour_gradient,..} => Fractals::Newton {max_iterations: 100, colour_gradient: colour_gradient.to_string()}
+                                };
+                                flags.reset = true;
+                                flags.generate_fractal = true;
+                            }
+                        });
+                    });
                 }
             });
             self.window_open = collapse_button.fully_open();
         });   
     }
-    
 }
