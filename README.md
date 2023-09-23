@@ -1,5 +1,5 @@
 # Fractal Viz
-A rust program to visualize fractals efficiently.
+A rust program to visualize and explore fractals efficiently.
 
 ![alt text](assets/julia.png?raw=true "Title")
 
